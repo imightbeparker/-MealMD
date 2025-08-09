@@ -8,6 +8,7 @@ Features:
 - Deterministic tie-breaking via --seed
 - JSON output with --json (good for piping/automation)
 - Remembers your last answers in ~/.mealmdrc (press Enter to accept defaults)
+- NEW: Multi-select avoidances in one step (e.g., 1,4,7)
 
 No external dependencies. Python 3.8+.
 """
@@ -45,7 +46,7 @@ def ask(
     allow_back: bool = False,
     default_index: Optional[int] = None,
 ) -> int:
-    """Return 1..len(choices); 0 if allow_zero; -1 if 'b' and allow_back; empty = default."""
+    """Return 1..len(choices); 0 if allow_zero; -1 if 'b' and allow_back; Enter => default."""
     print(f"\n{C.BOLD}{prompt}{C.RESET}")
     for i, ch in enumerate(choices, start=1):
         print(f"{i}. {ch}")
@@ -53,8 +54,6 @@ def ask(
         print("0. None/Done")
     if allow_back:
         print("b. Back")
-    if default_index is not None:
-        print(f"{C.DIM}(Press Enter for default: {default_index}){C.RESET}")
 
     while True:
         sel = input("> ").strip().lower()
@@ -69,6 +68,37 @@ def ask(
             if 1 <= idx <= len(choices):
                 return idx
         print(f"{C.YELLOW}Please enter a valid option.{C.RESET}")
+
+def ask_multi(
+    prompt: str,
+    choices: List[str],
+    allow_back: bool = False,
+    preselected: Optional[List[int]] = None,
+) -> List[int]:
+    """Multi-select by comma: returns sorted list of indices (1-based). Empty list = none."""
+    print(f"\n{C.BOLD}{prompt}{C.RESET}")
+    for i, ch in enumerate(choices, start=1):
+        print(f"{i}. {ch}")
+    print("0. None/Done")  # <-- Added explicit None option
+    if allow_back:
+        print("b. Back")
+    if preselected:
+        labels = ", ".join(choices[i-1] for i in sorted(set(preselected)) if 1 <= i <= len(choices))
+        print(f"{C.DIM}(Preselected: {labels}){C.RESET}")
+    print(f"{C.DIM}Enter numbers separated by commas (e.g., 1,4,6) or 0 for none.{C.RESET}")
+
+    while True:
+        raw = input("> ").strip().lower()
+        if allow_back and raw == "b":
+            return [-1]  # sentinel for "back"
+        if raw == "0":
+            return []
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if all(p.isdigit() for p in parts):
+            idxs = [int(p) for p in parts]
+            if all(1 <= i <= len(choices) for i in idxs):
+                return sorted(set(idxs))  # dedupe + sort
+        print(f"{C.YELLOW}Please enter valid numbers like 1,3,7 (or 0 for none).{C.RESET}")
 
 # ---------------- Data ---------------- #
 
@@ -268,7 +298,6 @@ def recommend(ans: Dict[str, Any], top_k: int = 3, seed: Optional[int] = None) -
             "explanation": "No meals fit all choices. Try relaxing one avoidance or picking 'No preference'."
         }
 
-    # deterministic tie-breaks if seed provided
     if seed is not None:
         random.seed(seed)
         random.shuffle(scored)
@@ -326,7 +355,7 @@ def main() -> None:
     print(f"{C.BOLD}=== MealMD (step-by-step) ==={C.RESET}")
     print("Answer with the number of your choice. Type 'b' to go back when available.")
 
-    # Pre-init to satisfy static analysis
+    # Pre-init for static analysis (values set by wizard)
     goal: Optional[str] = None
     timing: Optional[str] = None
     protein_pref: Optional[str] = None
@@ -335,74 +364,88 @@ def main() -> None:
     spice_pref: Optional[str] = None
     avoids: List[str] = []
 
-    # Load prior prefs (for defaults)
     prior = load_prefs() or {}
 
-    # Step 1: goal
-    while True:
-        goal_default = {"cut":1, "maintenance":2, "bulk":3}.get(prior.get("goal"))
-        g = ask("What's your current goal?", ["Cut (lean)", "Maintenance", "Bulk (gain)"], default_index=goal_default)
-        goal = {1:"cut", 2:"maintenance", 3:"bulk"}[g]
+    # 1) Goal
+    goal_default = {"cut":1, "maintenance":2, "bulk":3}.get(prior.get("goal"))
+    g = ask("What's your current goal?", ["Cut (lean)", "Maintenance", "Bulk (gain)"], default_index=goal_default)
+    goal = {1:"cut", 2:"maintenance", 3:"bulk"}[g]
 
-        # Step 2: timing
+    # 2) Timing
+    while True:
         timing_default = {"pre":1, "post":2, "any":3}.get(prior.get("timing"))
         t = ask("When is this meal?", ["Pre-workout (0–2h before)", "Post-workout (0–2h after)", "Anytime"],
                 allow_back=True, default_index=timing_default)
         if t == -1:
+            # back to goal
+            g = ask("What's your current goal?", ["Cut (lean)", "Maintenance", "Bulk (gain)"], default_index=goal_default)
+            goal = {1:"cut", 2:"maintenance", 3:"bulk"}[g]
             continue
         timing = {1:"pre", 2:"post", 3:"any"}[t]
+        break
 
-        # Step 3: protein pref
+    # 3) Protein preference
+    while True:
         prot_default = {"beef":1,"poultry":2,"fish/seafood":3,"plant-only":4,"no-preference":5}.get(prior.get("protein_pref"))
         p = ask("Pick a protein preference.", ["Beef/red meat", "Poultry (chicken/turkey)", "Fish/seafood", "Plant-only", "No preference"],
                 allow_back=True, default_index=prot_default)
         if p == -1:
+            # back to timing
             continue
         protein_pref = {1:"beef", 2:"poultry", 3:"fish/seafood", 4:"plant-only", 5:"no-preference"}[p]
+        break
 
-        # Step 4: avoidances (multi)
-        avoids_lookup = {1:"dairy", 2:"gluten", 3:"nuts", 4:"eggs", 5:"soy", 6:"shellfish", 7:"sesame"}
-        avoids = list(prior.get("avoids", []))
+    # 4) Avoidances (multi-select in one go)
+    avoids_lookup = ["Dairy","Gluten","Nuts","Eggs","Soy","Shellfish","Sesame"]
+    pre_idxs = [avoids_lookup.index(a.capitalize()) + 1 for a in prior.get("avoids", []) if a.capitalize() in avoids_lookup]
+    while True:
+        idxs = ask_multi(
+            "Do you need to avoid anything? (comma-separated, Enter for none).",
+            avoids_lookup + [],  # copy for safety
+            allow_back=True,
+            preselected=pre_idxs if pre_idxs else None,
+        )
+        if idxs == [-1]:
+            # back to protein pref
+            prot_default = {"beef":1,"poultry":2,"fish/seafood":3,"plant-only":4,"no-preference":5}.get(prior.get("protein_pref"))
+            p = ask("Pick a protein preference.", ["Beef/red meat", "Poultry (chicken/turkey)", "Fish/seafood", "Plant-only", "No preference"],
+                    default_index=prot_default)
+            protein_pref = {1:"beef", 2:"poultry", 3:"fish/seafood", 4:"plant-only", 5:"no-preference"}[p]
+            continue
+        avoids = [avoids_lookup[i-1].lower() for i in idxs]  # store as lowercase keys
         if avoids:
-            print(f"{C.DIM}Preselected avoids: {', '.join(avoids)}{C.RESET}")
-        while True:
-            a = ask("Do you need to avoid anything? Pick one at a time (0 to continue).",
-                    ["Dairy","Gluten","Nuts","Eggs","Soy","Shellfish","Sesame"], allow_zero=True, allow_back=True)
-            if a == -1:
-                # go back to protein pref
-                p = ask("Pick a protein preference.", ["Beef/red meat", "Poultry (chicken/turkey)", "Fish/seafood", "Plant-only", "No preference"])
-                protein_pref = {1:"beef", 2:"poultry", 3:"fish/seafood", 4:"plant-only", 5:"no-preference"}[p]
-                continue
-            if a == 0:
-                break
-            choice = avoids_lookup[a]
-            if choice not in avoids:
-                avoids.append(choice)
-                print(f"{C.CYAN}Added avoid: {choice}{C.RESET}")
+            print(f"{C.CYAN}Avoiding: {', '.join(avoids)}{C.RESET}")
+        break
 
-        # Step 5: effort
+    # 5) Effort
+    while True:
         effort_default = {"low":1, "med":2, "high":3, "restaurant":4}.get(prior.get("effort"))
         e = ask("How much cooking effort?", ["Low (<15 min)", "Medium (15–30 min)", "High (>30 min)", "Restaurant/Takeout OK"],
                 allow_back=True, default_index=effort_default)
         if e == -1:
+            # back to avoids
             continue
         effort = {1:"low", 2:"med", 3:"high", 4:"restaurant"}[e]
+        break
 
-        # Step 6: sodium
+    # 6) Sodium
+    while True:
         sodium_default = {"normal":1, "lower":2}.get(prior.get("sodium_pref"))
         s = ask("Sodium needs?", ["Normal", "Lower sodium"], allow_back=True, default_index=sodium_default)
         if s == -1:
+            # back to effort
             continue
         sodium_pref = {1:"normal", 2:"lower"}[s]
+        break
 
-        # Step 7: spice
+    # 7) Spice
+    while True:
         spice_default = {"mild":1, "medium":2, "spicy":3, "no-pref":4}.get(prior.get("spice_pref"))
         sp = ask("Spice preference?", ["Mild", "Medium", "Spicy", "No preference"], allow_back=True, default_index=spice_default)
         if sp == -1:
+            # back to sodium
             continue
         spice_pref = {1:"mild", 2:"medium", 3:"spicy", 4:"no-pref"}[sp]
-
-        # We made it through without going back
         break
 
     answers = {
