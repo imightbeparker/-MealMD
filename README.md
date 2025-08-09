@@ -12,7 +12,7 @@ A simple, interactive terminal bot that walks you through a few quick questions 
 ## Prerequisites
 Python 3.8+ is required. Install it if you don’t already have it.
 
-**Linux (Debian/Ubuntu)**
+**Linux**
 ```bash
 sudo apt update
 sudo apt install python3 -y
